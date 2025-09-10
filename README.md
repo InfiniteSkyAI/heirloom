@@ -42,7 +42,7 @@ jobs:
 ### Inputs
 | Name | Description | Required | Default |
 |------|-------------|----------|---------|
-| `github-token` | Required. A GitHub Personal Access Token (PAT) with appropriate scopes. | `true` |
+| `github-token` | Required. A GitHub Personal Access Token (PAT) with appropriate scopes. | `true` ||
 | `repo-owner` | The owner of the repository. | false | The repository owner from the GitHub context. |
 | `repo-name` | The name of the repository. | false | The repository name from the GitHub context. |
 | `parent-issue-labels` | A comma-separated list of labels to identify parent issues (e.g., `epic,story`). | false | `epic,story` |
