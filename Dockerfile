@@ -6,11 +6,11 @@ WORKDIR /github/workspace
 
 # Copy the requirements file and install dependencies.
 # The COPY command here is relative to the build context, which is the root of the repository.
-COPY requirements.txt ./
+COPY requirements.txt requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the Python script into the workspace.
-COPY github_issue_groomer.py ./
+COPY github_issue_groomer.py github_issue_groomer.py
 
 # Set the entrypoint to run the Python script.
 # This runs from the WORKDIR, so the file path is correct.
