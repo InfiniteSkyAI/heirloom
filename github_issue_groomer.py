@@ -264,6 +264,17 @@ def get_most_recent_child_activity(repo_owner, repo_name, issue_id, token, debug
     if not ignore_actors:
         ignore_actors = {"github-actions[bot]"}
 
+    # Read ignore list of labels from env, default to 'stale'. If a child
+    # issue has any of these labels we will treat it as non-recent activity
+    # (this prevents label-based bot churn from refreshing parents).
+    ignore_labels_env = _get_input("INPUT_IGNORE-LABELS") or ""
+    ignore_labels = set([l.strip().lower() for l in ignore_labels_env.split(',') if l.strip()])
+    if not ignore_labels:
+        ignore_labels = {"stale"}
+    if VERBOSE:
+        print(f"Ignoring actors: {sorted(ignore_actors)}")
+        print(f"Ignoring labels (case-insensitive): {sorted(ignore_labels)}")
+
     # BFS queue: start from direct children of the initial issue
     to_process = [issue_id]
     visited = set([issue_id])
@@ -286,7 +297,7 @@ def get_most_recent_child_activity(repo_owner, repo_name, issue_id, token, debug
                 # them when deciding whether a sub-issue has seen recent human
                 # activity.
                 fragments.append(
-                    f'i{idx}: repository(owner: "{repo_owner}", name: "{repo_name}") {{ issue(number: {parent_num}) {{ subIssues(first:100) {{ nodes {{ __typename ... on Issue {{ number updatedAt comments(last:1) {{ nodes {{ author {{ login __typename }} updatedAt }} }} }} }} }} }} }}'
+                    f'i{idx}: repository(owner: "{repo_owner}", name: "{repo_name}") {{ issue(number: {parent_num}) {{ subIssues(first:100) {{ nodes {{ __typename ... on Issue {{ number updatedAt comments(last:1) {{ nodes {{ author {{ login __typename }} updatedAt }} }} labels(first:100) {{ nodes {{ name }} }} }} }} }} }} }}'
                 )
 
             batched_query = "query{\n  " + "\n  ".join(fragments) + "\n}"
@@ -344,6 +355,17 @@ def get_most_recent_child_activity(repo_owner, repo_name, issue_id, token, debug
                         last_comment_type = None
                         last_comment_updated = None
 
+                    # Gather labels on the child issue (if present)
+                    labels_list = []
+                    try:
+                        labels_nodes = node.get("labels", {}).get("nodes", []) or []
+                        for ln in labels_nodes:
+                            name = ln.get("name") if isinstance(ln, dict) else None
+                            if name:
+                                labels_list.append(name)
+                    except Exception:
+                        labels_list = []
+
                     # Parse time
                     try:
                         updated_at = datetime.fromisoformat(updated_at_str.rstrip("Z"))
@@ -361,6 +383,13 @@ def get_most_recent_child_activity(repo_owner, repo_name, issue_id, token, debug
                     # matches (or is after) the issue's updatedAt, we ignore
                     # it.
                     consider_as_activity = True
+                    # If the child has any ignored label, always ignore it.
+                    try:
+                        lowered = set([l.lower() for l in labels_list])
+                        if lowered & ignore_labels:
+                            consider_as_activity = False
+                    except Exception:
+                        pass
                     # Detect bot authors heuristically: either the GraphQL
                     # __typename is 'Bot' or the login contains 'bot'. We always
                     # ignore bot authors regardless of INPUT_IGNORE-ACTORS.
@@ -408,6 +437,7 @@ def get_most_recent_child_activity(repo_owner, repo_name, issue_id, token, debug
                             "parent": parent_num,
                             "last_comment_author": last_comment_author,
                             "last_comment_updated": last_comment_updated,
+                            "labels": labels_list,
                             "consider_as_activity": consider_as_activity,
                         })
 
