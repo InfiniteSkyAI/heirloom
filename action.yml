@@ -33,6 +33,10 @@ inputs:
     description: 'The comment to add to parent issues to reset their stale timer.'
     required: false
     default: "🤖 Heirloom bot is keeping this epic fresh due to recent child issue activity."
+  update-all-ancestors:
+    description: 'When true, Heirloom will find all active issues and update all of their ancestors in the hierarchy. This overrides parent-issue-labels and parent-issue-types.'
+    required: false
+    default: 'false'
 
 runs:
   using: 'docker'
