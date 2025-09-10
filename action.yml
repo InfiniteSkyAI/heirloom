@@ -1,10 +1,13 @@
-name: 'Heirloom'
-description: 'Prevents parent issues from being marked as stale if any of their sub-issues are active.'
-author: 'qodfathr'
+name: Heirloom
+description: A GitHub Action that prevents parent issues from being marked as stale by checking for recent activity on their sub-issues.
+author: InfiniteSkyAI
+branding:
+  icon: 'package'
+  color: 'blue'
 
 inputs:
   github-token:
-    description: 'Token to authenticate with the GitHub API. This should be a PAT with read/write access to issues and projects.'
+    description: 'A GitHub Personal Access Token (PAT) with read:org and repo scopes.'
     required: true
   repo-owner:
     description: 'The owner of the repository.'
@@ -15,17 +18,21 @@ inputs:
     required: false
     default: ${{ github.event.repository.name }}
   parent-issue-labels:
-    description: 'A comma-separated list of labels to identify parent issues (e.g., epic, story).'
+    description: 'A comma-separated list of labels to identify parent issues.'
     required: false
-    default: 'epic,story'
+    default: ''
+  parent-issue-types:
+    description: 'A comma-separated list of issue types to identify parent issues (e.g., "EPIC").'
+    required: false
+    default: ''
   days-threshold:
-    description: 'The number of days of inactivity on a child issue to consider it "stale".'
+    description: 'The number of days of inactivity on a child issue to consider it "stale."'
     required: false
     default: '30'
   update-message:
     description: 'The comment to add to parent issues to reset their stale timer.'
     required: false
-    default: "🤖 This parent issue has been updated due to recent activity on a child issue."
+    default: "🤖 Heirloom bot is keeping this epic fresh due to recent child issue activity."
 
 runs:
   using: 'docker'
