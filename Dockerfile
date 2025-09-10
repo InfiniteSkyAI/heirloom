@@ -1,14 +1,11 @@
 FROM python:3.12-slim
 
-# Set the working directory to the GitHub Actions directory.
-WORKDIR /github/workspace
+WORKDIR /app
 
-# Copy the requirements file and install dependencies.
-COPY requirements.txt requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt github_issue_groomer.py /app/
 
-# Copy the Python script into the action's directory.
-COPY github_issue_groomer.py github_issue_groomer.py
+RUN pip install --no-cache-dir --upgrade pip \
+ && pip install --no-cache-dir -r requirements.txt \
+ && rm -rf /root/.cache
 
-# Set the entrypoint to run the Python script from the correct location.
-ENTRYPOINT ["python", "/github/workspace/github_issue_groomer.py"]
+ENTRYPOINT ["python", "-u", "/app/github_issue_groomer.py"]
