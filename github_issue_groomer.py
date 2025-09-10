@@ -93,17 +93,16 @@ def add_comment_to_issue(repo_owner, repo_name, issue_id, token, message, days_t
 
 
 def process_issues_by_hierarchy(repo_owner, repo_name, token, days_threshold, update_message, dry_run=False):
-    print("Executing Hierarchical Grooming Mode (scanning all issues)...")
+    print("Executing Hierarchical Grooming Mode (scanning stale open issues)...")
 
-    # We'll iterate every open issue in the repository (paginated) and for each
-    # potential parent check its projectItems for descendant issues. If any
-    # descendant has recent activity (within days_threshold) we'll add a
-    # comment to the parent to refresh its updated_at (unless the parent
-    # itself was recently updated, which add_comment_to_issue enforces).
+    # Query open issues ordered by UPDATED_AT ascending (oldest first). We
+    # only need to inspect issues that haven't been updated within the
+    # `days_threshold` window; once we reach an issue newer than the cutoff we
+    # can stop scanning because all subsequent issues will also be newer.
     query = """
     query($owner: String!, $name: String!, $after: String) {
       repository(owner: $owner, name: $name) {
-        issues(first: 100, states: OPEN, orderBy: {field: CREATED_AT, direction: ASC}, after: $after) {
+        issues(first: 100, states: OPEN, orderBy: {field: UPDATED_AT, direction: ASC}, after: $after) {
           nodes { number title updatedAt }
           pageInfo { hasNextPage endCursor }
         }
@@ -115,6 +114,8 @@ def process_issues_by_hierarchy(repo_owner, repo_name, token, days_threshold, up
     processed_parents = set()
     after_cursor = None
 
+    cutoff = datetime.now() - timedelta(days=days_threshold)
+
     while True:
         variables = {"owner": repo_owner, "name": repo_name, "after": after_cursor}
         resp = request_with_retries("post", GITHUB_GRAPHQL_URL, headers=headers, json={"query": query, "variables": variables})
@@ -125,7 +126,7 @@ def process_issues_by_hierarchy(repo_owner, repo_name, token, days_threshold, up
             nodes = issues_block.get("nodes", [])
         except (KeyError, TypeError):
             if VERBOSE:
-                print("GraphQL response while listing all issues:", data)
+                print("GraphQL response while listing issues:", data)
             print("No issues found or could not parse GraphQL response.")
             return
 
@@ -133,16 +134,32 @@ def process_issues_by_hierarchy(repo_owner, repo_name, token, days_threshold, up
             print("No issues found in repository.")
             return
 
+        # If any issue in this page is newer than the cutoff we can stop.
+        stop_all = False
+
         for issue in nodes:
             issue_number = issue.get("number")
             if issue_number is None:
                 continue
 
+            updated_at_str = issue.get("updatedAt")
+            if updated_at_str:
+                try:
+                    updated_at = datetime.fromisoformat(updated_at_str.rstrip("Z"))
+                except Exception:
+                    try:
+                        updated_at = datetime.fromisoformat(updated_at_str)
+                    except Exception:
+                        updated_at = None
+                if updated_at and updated_at > cutoff:
+                    stop_all = True
+                    break
+
             # Skip if we've already updated this parent in this run
             if issue_number in processed_parents:
                 continue
 
-            # Find the most recent activity among descendant (project) issues
+            # Find the most recent activity among descendant (sub) issues
             most_recent_child_activity = get_most_recent_child_activity(repo_owner, repo_name, issue_number, token)
             if most_recent_child_activity:
                 age_days = (datetime.now() - most_recent_child_activity).days
@@ -153,12 +170,16 @@ def process_issues_by_hierarchy(repo_owner, repo_name, token, days_threshold, up
                     except requests.exceptions.RequestException as e:
                         print(f"Error adding comment to issue #{issue_number}: {e}")
                     processed_parents.add(issue_number)
+
             # be polite to the API
             time.sleep(0.2)
 
         page_info = issues_block.get("pageInfo", {})
+        if stop_all:
+            print("Completed scanning stale open issues for descendant activity (newer issues skipped).")
+            break
         if not page_info.get("hasNextPage"):
-            print("Completed scanning all issues for descendant activity.")
+            print("Completed scanning all (stale) issues for descendant activity.")
             break
         after_cursor = page_info.get("endCursor")
         time.sleep(0.5)
