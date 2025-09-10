@@ -1,155 +1,179 @@
 import os
-import sys
-import datetime
-from github import Github, GithubException
+import requests
+from datetime import datetime, timedelta
 
-# --- Configuration (using environment variables from the action.yml) ---
-GITHUB_TOKEN = os.environ.get("INPUT_GITHUB-TOKEN")
-REPO_OWNER = os.environ.get("INPUT_REPO-OWNER")
-REPO_NAME = os.environ.get("INPUT_REPO-NAME")
-PARENT_ISSUE_LABELS_STR = os.environ.get("INPUT_PARENT-ISSUE-LABELS", "epic,story")
-DAYS_THRESHOLD_STR = os.environ.get("INPUT_DAYS-THRESHOLD", "30")
-UPDATE_MESSAGE = os.environ.get("INPUT_UPDATE-MESSAGE", "🤖 This parent issue has been updated due to recent activity on a child issue.")
-
-PARENT_ISSUE_LABELS = [label.strip() for label in PARENT_ISSUE_LABELS_STR.split(',')]
-
-try:
-    DAYS_THRESHOLD = int(DAYS_THRESHOLD_STR)
-except ValueError:
-    print("::error::Invalid value for days-threshold. Must be an integer.")
-    sys.exit(1)
-
-# --- GitHub API Initialization ---
-if not GITHUB_TOKEN:
-    print("::error::GitHub token not found. Please provide a token with 'repo' and 'read:org' scopes.")
-    sys.exit(1)
-
-try:
-    g = Github(GITHUB_TOKEN)
-    repo = g.get_repo(f"{REPO_OWNER}/{REPO_NAME}")
-except GithubException as e:
-    print(f"::error::Failed to connect to GitHub or repository: {e}")
-    sys.exit(1)
-
-def get_parent_issues():
+def get_most_recent_child_activity(repo_owner, repo_name, issue_id, token):
     """
-    Fetches open issues that have a parent-issue-label and a sub-issue-progress field.
-    Note: The new GitHub Issues fields are not directly searchable via the classic search API,
-    but we can filter after fetching.
+    Finds the most recent activity date for an issue's sub-issues.
+    Uses the GitHub GraphQL API to traverse the hierarchy efficiently.
     """
-    print(f"Searching for parent issues with labels: {PARENT_ISSUE_LABELS}")
-    query = f"repo:{REPO_OWNER}/{REPO_NAME} is:open is:issue " + " ".join([f"label:\"{label}\"" for label in PARENT_ISSUE_LABELS])
-    return g.search_issues(query=query)
+    url = "https://api.github.com/graphql"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+    
+    query = """
+    query($owner: String!, $name: String!, $issue_id: Int!) {
+      repository(owner: $owner, name: $name) {
+        issue(number: $issue_id) {
+          projectItems(first: 100) {
+            nodes {
+              fieldValues(first: 20) {
+                nodes {
+                  ... on ProjectV2ItemFieldSingleSelectValue {
+                    name
+                  }
+                  ... on ProjectV2ItemFieldDateValue {
+                    date
+                  }
+                  ... on ProjectV2ItemFieldTextValue {
+                    text
+                  }
+                }
+              }
+              content {
+                ... on Issue {
+                  id
+                  number
+                  title
+                  updatedAt
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+    variables = {
+        "owner": repo_owner,
+        "name": repo_name,
+        "issue_id": issue_id
+    }
+    
+    response = requests.post(url, headers=headers, json={'query': query, 'variables': variables})
+    response.raise_for_status()
+    data = response.json()
+    
+    most_recent_date = None
 
-def get_child_issues(parent_issue):
-    """
-    Retrieves sub-issues for a given parent issue using a GraphQL query.
-    This is necessary as the REST API v3 doesn't have a direct sub-issue endpoint.
-    """
-    print(f"Fetching sub-issues for parent issue #{parent_issue.number}...")
-
-    # Define the GraphQL query to get the sub-issues.
-    # We need to find the parent issue's ID first.
-    query_issue_id = f"""
-    query {{
-      repository(owner: "{REPO_OWNER}", name: "{REPO_NAME}") {{
-        issue(number: {parent_issue.number}) {{
-          id
-        }}
-      }}
-    }}
-    """
     try:
-        issue_id_result = g.graphql_api(query_issue_id)
-        parent_issue_id = issue_id_result['repository']['issue']['id']
-    except Exception as e:
-        print(f"::warning::Could not find GraphQL ID for issue #{parent_issue.number}. Skipping.")
-        return []
+        nodes = data['data']['repository']['issue']['projectItems']['nodes']
+        for node in nodes:
+            content = node.get('content')
+            if content and content.get('__typename') == 'Issue':
+                updated_at_str = content.get('updatedAt')
+                if updated_at_str:
+                    updated_at = datetime.fromisoformat(updated_at_str.rstrip('Z'))
+                    if most_recent_date is None or updated_at > most_recent_date:
+                        most_recent_date = updated_at
+    except (KeyError, TypeError) as e:
+        print(f"Warning: Could not parse GraphQL response for issue {issue_id}: {e}")
+        return None
+        
+    return most_recent_date
 
-    # Now use that ID to find all linked child issues.
-    query_children = f"""
+def add_comment_to_issue(repo_owner, repo_name, issue_id, token, message):
+    """
+    Adds a comment to a given issue.
+    """
+    url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/issues/{issue_id}/comments"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "body": message
+    }
+    
+    response = requests.post(url, headers=headers, json=payload)
+    response.raise_for_status()
+    print(f"Successfully added comment to issue #{issue_id}.")
+
+def main():
+    """
+    Main logic for the Heirloom bot.
+    """
+    # Get inputs from environment variables set by the action
+    token = os.environ.get('INPUT_GITHUB-TOKEN')
+    repo_owner = os.environ.get('INPUT_REPO-OWNER')
+    repo_name = os.environ.get('INPUT_REPO-NAME')
+    parent_labels = os.environ.get('INPUT_PARENT-ISSUE-LABELS').split(',')
+    parent_types = os.environ.get('INPUT_PARENT-ISSUE-TYPES').split(',')
+    days_threshold = int(os.environ.get('INPUT_DAYS-THRESHOLD'))
+    update_message = os.environ.get('INPUT_UPDATE-MESSAGE')
+
+    if not all([token, repo_owner, repo_name]):
+        print("Missing required inputs. Please check your workflow configuration.")
+        exit(1)
+
+    if not parent_labels and not parent_types:
+        print("At least one of 'parent-issue-labels' or 'parent-issue-types' must be provided.")
+        exit(1)
+
+    print(f"Starting Heirloom bot for {repo_owner}/{repo_name}...")
+
+    # Construct the GraphQL query dynamically
+    query_filters = []
+    if parent_labels and parent_labels[0]:
+        query_filters.append(f'labels: [{",".join([f'"{label.strip()}"' for label in parent_labels])}]')
+    if parent_types and parent_types[0]:
+        query_filters.append(f'issueTypes: [{",".join([f'{issue_type.strip()}' for issue_type in parent_types])}]')
+    
+    issues_filter_string = ", ".join(query_filters)
+
+    query_parent_issues = f"""
     query {{
-      node(id: "{parent_issue_id}") {{
-        ... on Issue {{
-          children(first: 100) {{
-            nodes {{
-              ... on Issue {{
-                number
-                updatedAt
-              }}
-            }}
+      repository(owner: "{repo_owner}", name: "{repo_name}") {{
+        issues(first: 50, {issues_filter_string}, states: OPEN) {{
+          nodes {{
+            id
+            number
+            title
+            updatedAt
           }}
         }}
       }}
     }}
     """
-    try:
-        children_result = g.graphql_api(query_children)
-        children_nodes = children_result.get('node', {}).get('children', {}).get('nodes', [])
-        return children_nodes
-    except Exception as e:
-        print(f"::warning::GraphQL query for children of issue #{parent_issue.number} failed: {e}. Skipping.")
-        return []
-
-
-def update_parent_issue(parent_issue, child_issue_number):
-    """
-    Adds a comment to the parent issue to update its updated_at field.
-    """
-    print(f"Updating parent issue #{parent_issue.number} with a comment...")
-    try:
-        comment_body = f"{UPDATE_MESSAGE} Child issue: #{child_issue_number}."
-        parent_issue.create_comment(comment_body)
-        print(f"Successfully commented on issue #{parent_issue.number}.")
-    except Exception as e:
-        print(f"::error::Failed to update issue #{parent_issue.number}: {e}")
-
-def main():
-    """
-    Main function to run the grooming process.
-    """
-    print("Starting Heirloom Issue Groomer...")
-    parent_issues = get_parent_issues()
     
-    found_issues = False
-    for parent_issue in parent_issues:
-        found_issues = True
-        print(f"Processing parent issue: #{parent_issue.number} - '{parent_issue.title}'")
+    url = "https://api.github.com/graphql"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+    
+    response = requests.post(url, headers=headers, json={'query': query_parent_issues})
+    response.raise_for_status()
+    data = response.json()
+    
+    try:
+        parent_issues = data['data']['repository']['issues']['nodes']
+    except (KeyError, TypeError) as e:
+        print(f"Warning: Could not fetch parent issues: {e}")
+        return
+
+    for issue in parent_issues:
+        issue_number = issue['number']
+        print(f"Processing parent issue: #{issue_number} - {issue['title']}")
+
+        most_recent_child_activity = get_most_recent_child_activity(repo_owner, repo_name, issue_number, token)
         
-        children = get_child_issues(parent_issue)
-        
-        if not children:
-            print(f"No sub-issues found for #{parent_issue.number}. Skipping.")
-            continue
+        if most_recent_child_activity:
+            current_date = datetime.now()
+            days_since_child_activity = (current_date - most_recent_child_activity).days
             
-        most_recent_child_update = None
-        most_recent_child_number = None
-
-        for child in children:
-            child_updated_at = datetime.datetime.fromisoformat(child['updatedAt'].replace('Z', '+00:00'))
-            if most_recent_child_update is None or child_updated_at > most_recent_child_update:
-                most_recent_child_update = child_updated_at
-                most_recent_child_number = child['number']
-
-        if most_recent_child_update:
-            days_since_last_child_activity = (datetime.datetime.now(datetime.timezone.utc) - most_recent_child_update).days
-            print(f"Most recent child activity on #{most_recent_child_number} was {days_since_last_child_activity} days ago.")
-
-            if days_since_last_child_activity <= DAYS_THRESHOLD:
-                # Check if the parent issue is already up-to-date
-                parent_updated_at = parent_issue.updated_at.replace(tzinfo=datetime.timezone.utc)
-                if most_recent_child_update > parent_updated_at:
-                    print(f"Parent issue is older than child. Updating parent issue #{parent_issue.number}...")
-                    update_parent_issue(parent_issue, most_recent_child_number)
-                else:
-                    print(f"Parent issue is already up-to-date. No action needed.")
+            if days_since_child_activity < days_threshold:
+                # Add a comment to the parent issue to update its `updated_at` time
+                try:
+                    add_comment_to_issue(repo_owner, repo_name, issue_number, token, update_message)
+                except requests.exceptions.RequestException as e:
+                    print(f"Error adding comment to issue #{issue_number}: {e}")
             else:
-                print(f"Child activity is older than threshold of {DAYS_THRESHOLD} days. No action needed.")
+                print(f"No recent child activity for issue #{issue_number}. It will be handled by the stale bot.")
         else:
-            print(f"No recent activity on sub-issues for #{parent_issue.number}.")
-
-    if not found_issues:
-      print("No parent issues found with the specified labels. No action needed.")
-
+            print(f"No sub-issues found or could not determine activity for issue #{issue_number}.")
+            
 if __name__ == "__main__":
     main()
