@@ -11,4 +11,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY github_issue_groomer.py github_issue_groomer.py
 
 # Set the entrypoint to run the Python script from the correct location.
-ENTRYPOINT ["python", "github_issue_groomer.py"]
+ENTRYPOINT ["python", "/github/workspace/github_issue_groomer.py"]
