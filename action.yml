@@ -1,15 +1,18 @@
 name: 'Heirloom'
 description: 'Prevents parent issues from being marked as stale if any of their sub-issues are active.'
-author: 'Your GitHub Username'
+author: 'qodfathr'
 
 inputs:
+  github-token:
+    description: 'Token to authenticate with the GitHub API. This should be a PAT with read/write access to issues and projects.'
+    required: true
   repo-owner:
     description: 'The owner of the repository.'
-    required: true
+    required: false
     default: ${{ github.repository_owner }}
   repo-name:
     description: 'The name of the repository.'
-    required: true
+    required: false
     default: ${{ github.event.repository.name }}
   parent-issue-labels:
     description: 'A comma-separated list of labels to identify parent issues (e.g., epic, story).'
@@ -25,5 +28,5 @@ inputs:
     default: "🤖 This parent issue has been updated due to recent activity on a child issue."
 
 runs:
-  using: 'node20'
-  main: 'dist/index.js' # This points to the compiled JavaScript file.
+  using: 'docker'
+  image: 'Dockerfile'
