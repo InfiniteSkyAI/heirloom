@@ -258,6 +258,12 @@ def get_most_recent_child_activity(repo_owner, repo_name, issue_id, token, debug
     details = []
     raw_batches = []
 
+    # Read ignore list of actor logins from env, default to github-actions[bot]
+    ignore_actors_env = _get_input("INPUT_IGNORE-ACTORS") or ""
+    ignore_actors = set([a.strip() for a in ignore_actors_env.split(',') if a.strip()])
+    if not ignore_actors:
+        ignore_actors = {"github-actions[bot]"}
+
     # BFS queue: start from direct children of the initial issue
     to_process = [issue_id]
     visited = set([issue_id])
@@ -275,8 +281,12 @@ def get_most_recent_child_activity(repo_owner, repo_name, issue_id, token, debug
             # Build a batched GraphQL query to fetch subIssues for each parent
             fragments = []
             for idx, parent_num in enumerate(batch):
+                # Also fetch the last comment (author + updatedAt) so we can
+                # detect bot comments (for example actions/stale) and ignore
+                # them when deciding whether a sub-issue has seen recent human
+                # activity.
                 fragments.append(
-                    f'i{idx}: repository(owner: "{repo_owner}", name: "{repo_name}") {{ issue(number: {parent_num}) {{ subIssues(first:100) {{ nodes {{ __typename ... on Issue {{ number updatedAt }} }} }} }} }}'
+                    f'i{idx}: repository(owner: "{repo_owner}", name: "{repo_name}") {{ issue(number: {parent_num}) {{ subIssues(first:100) {{ nodes {{ __typename ... on Issue {{ number updatedAt comments(last:1) {{ nodes {{ author {{ login __typename }} updatedAt }} }} }} }} }} }} }}'
                 )
 
             batched_query = "query{\n  " + "\n  ".join(fragments) + "\n}"
@@ -313,6 +323,27 @@ def get_most_recent_child_activity(repo_owner, repo_name, issue_id, token, debug
                     if child_number is None or not updated_at_str:
                         continue
 
+                    # Inspect last comment author (if present) to see whether
+                    # the recent update was caused by a known bot actor. If so,
+                    # we treat it as non-human activity for the purpose of
+                    # deciding to refresh parents.
+                    last_comment_author = None
+                    last_comment_type = None
+                    last_comment_updated = None
+                    try:
+                        comments_nodes = node.get("comments", {}).get("nodes", []) or []
+                        if comments_nodes:
+                            last = comments_nodes[-1]
+                            author = last.get("author") or {}
+                            last_comment_author = author.get("login")
+                            last_comment_type = author.get("__typename")
+                            last_comment_updated = last.get("updatedAt")
+                    except Exception:
+                        # tolerate malformed comment structures
+                        last_comment_author = None
+                        last_comment_type = None
+                        last_comment_updated = None
+
                     # Parse time
                     try:
                         updated_at = datetime.fromisoformat(updated_at_str.rstrip("Z"))
@@ -324,16 +355,60 @@ def get_most_recent_child_activity(repo_owner, repo_name, issue_id, token, debug
                                 print(f"Could not parse updatedAt for subIssue {child_number} of parent {parent_num}:", updated_at_str)
                             continue
 
-                    # Record most recent
-                    if most_recent_date is None or updated_at > most_recent_date:
-                        most_recent_date = updated_at
+                    # Decide whether this updatedAt should be considered
+                    # 'human' activity. If the last comment was authored by a
+                    # configured ignored actor and the comment timestamp
+                    # matches (or is after) the issue's updatedAt, we ignore
+                    # it.
+                    consider_as_activity = True
+                    # Detect bot authors heuristically: either the GraphQL
+                    # __typename is 'Bot' or the login contains 'bot'. We always
+                    # ignore bot authors regardless of INPUT_IGNORE-ACTORS.
+                    bot_author = False
+                    try:
+                        if last_comment_type and str(last_comment_type).lower() == 'bot':
+                            bot_author = True
+                        elif last_comment_author:
+                            la = last_comment_author.lower()
+                            # common bot indicators: suffix '[bot]', dependabot
+                            # mentions, explicit 'github-actions' login, or any
+                            # login containing 'bot'
+                            if la.endswith('[bot]') or 'dependabot' in la or la.startswith('github-actions') or 'bot' in la:
+                                bot_author = True
+                    except Exception:
+                        bot_author = False
+
+                    if bot_author:
+                        try:
+                            if last_comment_updated:
+                                lc_dt = datetime.fromisoformat(last_comment_updated.rstrip("Z"))
+                                if lc_dt >= updated_at:
+                                    consider_as_activity = False
+                        except Exception:
+                            consider_as_activity = True
+                    elif last_comment_author and last_comment_author in ignore_actors:
+                        try:
+                            if last_comment_updated:
+                                lc_dt = datetime.fromisoformat(last_comment_updated.rstrip("Z"))
+                                if lc_dt >= updated_at:
+                                    consider_as_activity = False
+                        except Exception:
+                            consider_as_activity = True
+
+                    # Record most recent (only consider human activity)
+                    if consider_as_activity:
+                        if most_recent_date is None or updated_at > most_recent_date:
+                            most_recent_date = updated_at
 
                     if debug:
                         details.append({
                             "source": "subIssue",
                             "number": child_number,
-                            "updated_at": updated_at.isoformat(),
+                            "updated_at": updated_at,
                             "parent": parent_num,
+                            "last_comment_author": last_comment_author,
+                            "last_comment_updated": last_comment_updated,
+                            "consider_as_activity": consider_as_activity,
                         })
 
                     # Enqueue for further traversal if we haven't seen it before
